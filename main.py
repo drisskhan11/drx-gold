@@ -3,11 +3,12 @@ import asyncio
 import requests
 import pandas as pd
 import feedparser
+from datetime import datetime, timezone
 from telegram import Bot
 from groq import Groq
 from openai import OpenAI
 
-# --- إعدادات المفاتيح ---
+# --- الإعدادات ---
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 TWELVEDATA_API_KEY = os.environ.get("TWELVEDATA_API_KEY")
@@ -21,7 +22,8 @@ openrouter_client = OpenAI(
 )
 
 def get_market_data(symbol="XAU/USD"):
-    url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval=1h&outputsize=50&apikey={TWELVEDATA_API_KEY}"
+    # إطار 15 دقيقة للصيد السريع
+    url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval=15min&outputsize=100&apikey={TWELVEDATA_API_KEY}"
     response = requests.get(url).json()
     
     if "values" not in response:
@@ -46,21 +48,29 @@ def get_market_data(symbol="XAU/USD"):
     df['MACD'] = exp1 - exp2
     df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
     
-    # 3. EMA 20 و EMA 50 (متوسطات متحركة)
+    # 3. EMA
     df['EMA_20'] = df['close'].ewm(span=20, adjust=False).mean()
     df['EMA_50'] = df['close'].ewm(span=50, adjust=False).mean()
     
-    # 4. Bollinger Bands (20 فترة، 2 انحراف معياري)
+    # 4. Bollinger Bands
     df['BB_Middle'] = df['close'].rolling(window=20).mean()
     df['BB_Std'] = df['close'].rolling(window=20).std()
     df['BB_Upper'] = df['BB_Middle'] + (df['BB_Std'] * 2)
     df['BB_Lower'] = df['BB_Middle'] - (df['BB_Std'] * 2)
     
-    # 5. Stochastic Oscillator (14, 3, 3)
+    # 5. Stochastic
     low_14 = df['low'].rolling(window=14).min()
     high_14 = df['high'].rolling(window=14).max()
     df['Stoch_K'] = 100 * ((df['close'] - low_14) / (high_14 - low_14))
     df['Stoch_D'] = df['Stoch_K'].rolling(window=3).mean()
+    
+    # 6. ATR (Average True Range) لحساب وقف الخسارة
+    high_low = df['high'] - df['low']
+    high_close = (df['high'] - df['close'].shift()).abs()
+    low_close = (df['low'] - df['close'].shift()).abs()
+    ranges = pd.concat([high_low, high_close, low_close], axis=1)
+    true_range = ranges.max(axis=1)
+    df['ATR'] = true_range.rolling(14).mean()
     
     latest = df.iloc[-1]
     return {
@@ -74,49 +84,86 @@ def get_market_data(symbol="XAU/USD"):
         "bb_lower": round(latest['BB_Lower'], 2),
         "stoch_k": round(latest['Stoch_K'], 2),
         "stoch_d": round(latest['Stoch_D'], 2),
+        "atr": round(latest['ATR'], 2),
     }
-
-def get_dxy():
-    # مؤشر الدولار (DXY) من TwelveData
-    url = f"https://api.twelvedata.com/time_series?symbol=DXY&interval=1h&outputsize=1&apikey={TWELVEDATA_API_KEY}"
-    try:
-        response = requests.get(url).json()
-        if "values" in response and len(response["values"]) > 0:
-            return round(float(response["values"][0]["close"]), 2)
-    except:
-        pass
-    return None
 
 def get_filtered_news():
     feeds = [
         "https://www.mining.com/feed/",
-        "https://www.investing.com/rss/news_25.rss",
-        "https://www.fxstreet.com/rss/news",
-        "https://www.kitco.com/rss/KitcoNews.xml"
+        "https://www.investing.com/rss/news_25.rss"
     ]
-    # كلمات مفتاحية: الذهب، المعادن، الدولار، الفيدرالي، التضخم
-    keywords = ["gold", "xau", "silver", "metal", "mining", "dollar", "fed", "inflation", "bullion", "precious"]
+    keywords = ["gold", "xau", "silver", "metal", "mining", "dollar", "fed", "inflation"]
     news_list = []
-    
     for url in feeds:
         try:
             feed = feedparser.parse(url)
-            for entry in feed.entries[:10]:  # شوف 10 أخبار من كل مصدر
+            for entry in feed.entries[:10]:
                 title = entry.get('title', '')
-                summary = entry.get('summary', '')
-                text = (title + " " + summary).lower()
-                
-                # فلترة: غير الأخبار اللي فيها كلمات مفتاحية
+                text = title.lower()
                 if any(kw in text for kw in keywords):
                     news_list.append(f"- {title}")
-                    if len(news_list) >= 6:  # خد 6 أخبار غير
-                        break
-            if len(news_list) >= 6:
-                break
-        except:
-            continue
+                    if len(news_list) >= 4: break
+            if len(news_list) >= 4: break
+        except: continue
+    return "\n".join(news_list) if news_list else "لا توجد أخبار."
+
+def is_trading_session():
+    # التداول فقط فـ لندن ونيويورك (8:00 - 21:00 UTC)
+    now = datetime.now(timezone.utc)
+    return 8 <= now.hour <= 21
+
+def calculate_signal(data):
+    price = data['price']
+    ema20 = data['ema_20']
+    ema50 = data['ema_50']
+    rsi = data['rsi']
+    macd = data['macd']
+    macd_signal = data['macd_signal']
+    stoch_k = data['stoch_k']
+    bb_upper = data['bb_upper']
+    bb_lower = data['bb_lower']
+    atr = data['atr']
     
-    return "\n".join(news_list) if news_list else "لا توجد أخبار مهمة حالياً."
+    score = 0
+    direction = "NEUTRAL"
+    
+    # شروط الشراء القوية (Trend + Momentum + Pullback)
+    if price > ema20 and ema20 > ema50 and rsi < 65 and macd > macd_signal and stoch_k < 75 and price < bb_upper:
+        score += 1
+    if 40 < rsi < 65: score += 1
+    if macd > macd_signal and macd > 0: score += 1
+    if stoch_k < 75 and stoch_k > stoch_d: score += 1
+    if price > ema50: score += 1
+    
+    if score >= 4:
+        direction = "BUY"
+    
+    # شروط البيع القوية
+    score = 0
+    if price < ema20 and ema20 < ema50 and rsi > 35 and macd < macd_signal and stoch_k > 25 and price > bb_lower:
+        score += 1
+    if 35 < rsi < 60: score += 1
+    if macd < macd_signal and macd < 0: score += 1
+    if stoch_k > 25 and stoch_k < stoch_d: score += 1
+    if price < ema50: score += 1
+    
+    if score >= 4:
+        direction = "SELL"
+    
+    # إدارة المخاطر (Stop Loss & Take Profit based on ATR)
+    if direction == "BUY":
+        entry = price
+        sl = price - (atr * 1.5) # وقف خسارة 1.5x ATR
+        tp = price + (atr * 3.0) # هدف 3x ATR (Risk/Reward 1:2)
+        return direction, entry, sl, tp
+    
+    elif direction == "SELL":
+        entry = price
+        sl = price + (atr * 1.5)
+        tp = price - (atr * 3.0)
+        return direction, entry, sl, tp
+    
+    return "NEUTRAL", 0, 0, 0
 
 def analyze_with_ai(model, prompt):
     try:
@@ -127,70 +174,67 @@ def analyze_with_ai(model, prompt):
                 max_tokens=800
             )
             return res.choices[0].message.content
-        
         elif model == "openrouter":
             res = openrouter_client.chat.completions.create(
-                model="openrouter/free",
+                # نموذج مالي متخصص (Ling Financial)
+                model="inclusionai/ling-3.0-flash-fin:free", 
                 messages=[{"role": "user", "content": prompt}]
             )
             return res.choices[0].message.content
-            
     except Exception as e:
-        return f"⚠️ تعذر التحليل من {model}: {str(e)[:50]}..."
+        return f"⚠️ {model}: {str(e)[:50]}..."
 
 async def main():
     bot = Bot(token=TELEGRAM_TOKEN)
     
+    if not is_trading_session():
+        print("خارج أوقات السيولة. البوت كيرتاح.")
+        return
+    
     data = get_market_data()
     news = get_filtered_news()
-    dxy = get_dxy()
     
     if not data:
-        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="⚠️ مشكل فـ جلب البيانات من TwelveData.")
         return
 
-    dxy_text = f"{dxy}" if dxy else "غير متاح"
+    direction, entry, sl, tp = calculate_signal(data)
+    
+    # الفلتر الذهبي: ما نصيفطو حتى رسالة إلا كانت إشارة قوية
+    if direction == "NEUTRAL":
+        print("لا توجد إشارة قوية دابا. البوت كيراقب.")
+        return
     
     prompt = f"""
-    أنت محلل مالي خبير. لديك البيانات التالية عن الذهب (XAU/USD):
-    
-    **البيانات التقنية:**
+    أنت مدير صندوق تحوط (Hedge Fund Manager) خبير. 
+    لدينا إشارة {direction} على الذهب (XAU/USD).
     - السعر الحالي: {data['price']}
-    - RSI (14): {data['rsi']}
-    - MACD: {data['macd']} (إشارة: {data['macd_signal']})
-    - EMA 20: {data['ema_20']} | EMA 50: {data['ema_50']}
-    - Bollinger Bands: العلوي {data['bb_upper']} | السفلي {data['bb_lower']}
-    - Stochastic K: {data['stoch_k']} | D: {data['stoch_d']}
+    - الدخول المقترح: {entry}
+    - وقف الخسارة: {sl}
+    - الهدف: {tp}
+    - RSI: {data['rsi']}, MACD: {data['macd']}, Stoch: {data['stoch_k']}
+    - الأخبار: {news}
     
-    **مؤشر الدولار (DXY):** {dxy_text}
-    
-    **آخر الأخبار المهمة (الذهب، المعادن، الدولار):**
-    {news}
-    
-    بناءً على هذه البيانات، هل الإشارة هي "شراء" أو "بيع" أو "انتظار"؟ 
-    اشرح باختصار (3-4 أسطر) مع ذكر تأثير مؤشر الدولار والأخبار.
+    هل تؤكد هذه الصفقة؟ ما هي نسبة نجاحها من 100% برأيك؟ اشرح باختصار.
     """
-
-    analysis_openrouter = analyze_with_ai("openrouter", prompt)
-    analysis_groq = analyze_with_ai("groq", prompt)
+    
+    ai_opinion = analyze_with_ai("openrouter", prompt)
 
     message = f"""
-📊 **تحليل السوق الشامل (XAU/USD)**
-💰 السعر: {data['price']}
-📈 RSI: {data['rsi']} | Stoch K: {data['stoch_k']}
-📉 MACD: {data['macd']} (Signal: {data['macd_signal']})
-📊 EMA 20/50: {data['ema_20']} / {data['ema_50']}
-🎯 BB: {data['bb_upper']} / {data['bb_lower']}
-💵 DXY (الدولار): {dxy_text}
+🎯 **فرصة تداول قوية (XAU/USD)** 🎯
+الاتجاه: **{direction}**
+💰 السعر الحالي: {data['price']}
+🚪 الدخول المقترح: {entry}
+🛑 وقف الخسارة (SL): {sl}
+🎯 الهدف (TP): {tp}
+(Risk/Reward = 1:2)
 
-📰 **الأخبار المهمة:**
-{news}
+📊 **المؤشرات:**
+RSI: {data['rsi']} | MACD: {data['macd']} | Stoch: {data['stoch_k']}
 
-🤖 **رأي OpenRouter:**
-{analysis_openrouter}
+🤖 **رأي المستشار المالي (Ling Fin):**
+{ai_opinion}
 
-🤖 **رأي Groq:**
-{analysis_groq}
+⚠️ *هذا تحليل تقني وليس نصيحة استثمارية. التزم بإدارة رأس المال.*
     """
     
     await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode='Markdown')
