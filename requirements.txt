@@ -1,0 +1,7 @@
+python-telegram-bot
+openai
+groq
+requests
+pandas
+pandas-ta-classic
+feedparser
