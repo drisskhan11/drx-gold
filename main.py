@@ -73,14 +73,14 @@ def analyze_with_ai(model, prompt):
     try:
         if model == "groq":
             res = groq_client.chat.completions.create(
-                model="llama3-8b-8192",
+                model="llama-3.3-70b-versatile",
                 messages=[{"role": "user", "content": prompt}]
             )
             return res.choices[0].message.content
         
         elif model == "openrouter":
             res = openrouter_client.chat.completions.create(
-                model="meta-llama/llama-3-8b-instruct:free", 
+                model="openrouter/free",
                 messages=[{"role": "user", "content": prompt}]
             )
             return res.choices[0].message.content
