@@ -2,7 +2,6 @@ import os
 import asyncio
 import requests
 import pandas as pd
-import pandas_ta as ta
 import feedparser
 from telegram import Bot
 from groq import Groq
@@ -18,7 +17,7 @@ OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 # --- إعدادات Groq ---
 groq_client = Groq(api_key=GROQ_API_KEY)
 
-# --- إعدادات OpenRouter (كيستعمل مكتبة OpenAI ولكن بخادم مختلف) ---
+# --- إعدادات OpenRouter ---
 openrouter_client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=OPENROUTER_API_KEY,
@@ -37,16 +36,25 @@ def get_market_data(symbol="XAU/USD"):
     df = df.sort_index()
     df = df.astype(float)
     
-    # حساب المؤشرات
-    df.ta.rsi(length=14, append=True)
-    df.ta.macd(append=True)
+    # حساب RSI يدويا
+    delta = df['close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    df['RSI'] = 100 - (100 / (1 + rs))
+    
+    # حساب MACD يدويا
+    exp1 = df['close'].ewm(span=12, adjust=False).mean()
+    exp2 = df['close'].ewm(span=26, adjust=False).mean()
+    df['MACD'] = exp1 - exp2
+    df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
     
     latest = df.iloc[-1]
     return {
         "price": latest['close'],
-        "rsi": latest.get('RSI_14', 'N/A'),
-        "macd": latest.get('MACD_12_26_9', 'N/A'),
-        "macd_signal": latest.get('MACDs_12_26_9', 'N/A')
+        "rsi": round(latest['RSI'], 2),
+        "macd": round(latest['MACD'], 2),
+        "macd_signal": round(latest['MACD_Signal'], 2)
     }
 
 def get_news():
@@ -104,7 +112,6 @@ async def main():
     اشرح باختصار في سطرين.
     """
 
-    # التحليل بـ AI
     analysis_openrouter = analyze_with_ai("openrouter", prompt)
     analysis_groq = analyze_with_ai("groq", prompt)
 
