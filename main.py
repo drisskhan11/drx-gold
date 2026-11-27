@@ -22,7 +22,6 @@ openrouter_client = OpenAI(
 )
 
 def get_market_data(symbol="XAU/USD"):
-    # إطار 15 دقيقة للصيد السريع
     url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval=15min&outputsize=100&apikey={TWELVEDATA_API_KEY}"
     response = requests.get(url).json()
     
@@ -64,7 +63,7 @@ def get_market_data(symbol="XAU/USD"):
     df['Stoch_K'] = 100 * ((df['close'] - low_14) / (high_14 - low_14))
     df['Stoch_D'] = df['Stoch_K'].rolling(window=3).mean()
     
-    # 6. ATR (Average True Range) لحساب وقف الخسارة
+    # 6. ATR
     high_low = df['high'] - df['low']
     high_close = (df['high'] - df['close'].shift()).abs()
     low_close = (df['low'] - df['close'].shift()).abs()
@@ -108,7 +107,6 @@ def get_filtered_news():
     return "\n".join(news_list) if news_list else "لا توجد أخبار."
 
 def is_trading_session():
-    # التداول فقط فـ لندن ونيويورك (8:00 - 21:00 UTC)
     now = datetime.now(timezone.utc)
     return 8 <= now.hour <= 21
 
@@ -120,6 +118,7 @@ def calculate_signal(data):
     macd = data['macd']
     macd_signal = data['macd_signal']
     stoch_k = data['stoch_k']
+    stoch_d = data['stoch_d']
     bb_upper = data['bb_upper']
     bb_lower = data['bb_lower']
     atr = data['atr']
@@ -127,7 +126,7 @@ def calculate_signal(data):
     score = 0
     direction = "NEUTRAL"
     
-    # شروط الشراء القوية (Trend + Momentum + Pullback)
+    # شروط الشراء القوية
     if price > ema20 and ema20 > ema50 and rsi < 65 and macd > macd_signal and stoch_k < 75 and price < bb_upper:
         score += 1
     if 40 < rsi < 65: score += 1
@@ -150,13 +149,12 @@ def calculate_signal(data):
     if score >= 4:
         direction = "SELL"
     
-    # إدارة المخاطر (Stop Loss & Take Profit based on ATR)
+    # إدارة المخاطر
     if direction == "BUY":
         entry = price
-        sl = price - (atr * 1.5) # وقف خسارة 1.5x ATR
-        tp = price + (atr * 3.0) # هدف 3x ATR (Risk/Reward 1:2)
+        sl = price - (atr * 1.5)
+        tp = price + (atr * 3.0)
         return direction, entry, sl, tp
-    
     elif direction == "SELL":
         entry = price
         sl = price + (atr * 1.5)
@@ -176,8 +174,7 @@ def analyze_with_ai(model, prompt):
             return res.choices[0].message.content
         elif model == "openrouter":
             res = openrouter_client.chat.completions.create(
-                # نموذج مالي متخصص (Ling Financial)
-                model="inclusionai/ling-3.0-flash-fin:free", 
+                model="inclusionai/ling-3.0-flash-fin:free",
                 messages=[{"role": "user", "content": prompt}]
             )
             return res.choices[0].message.content
@@ -199,7 +196,6 @@ async def main():
 
     direction, entry, sl, tp = calculate_signal(data)
     
-    # الفلتر الذهبي: ما نصيفطو حتى رسالة إلا كانت إشارة قوية
     if direction == "NEUTRAL":
         print("لا توجد إشارة قوية دابا. البوت كيراقب.")
         return
