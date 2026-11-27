@@ -73,7 +73,7 @@ def analyze_with_ai(model, prompt):
     try:
         if model == "groq":
             res = groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model="openai/gpt-oss-20b",
                 messages=[{"role": "user", "content": prompt}]
             )
             return res.choices[0].message.content
