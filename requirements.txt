@@ -3,5 +3,5 @@ openai
 groq
 requests
 pandas
-pandas-ta-classic
+pandas_ta
 feedparser
