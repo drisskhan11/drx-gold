@@ -2,8 +2,9 @@ name: Gold Trading Bot
 
 on:
   schedule:
-    - cron: '*/15 * * * *' # كيخدم كل 15 دقيقة
-  workflow_dispatch: # باش تقدر تشغلو بيدك
+    # كيخدم كل 5 دقائق، غير من 8:00 حتى 16:00 UTC
+    - cron: '*/5 8-15 * * *' 
+  workflow_dispatch:
 
 jobs:
   run-bot:
