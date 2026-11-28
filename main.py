@@ -22,7 +22,8 @@ openrouter_client = OpenAI(
 )
 
 def get_market_data(symbol="XAU/USD"):
-    url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval=15min&outputsize=100&apikey={TWELVEDATA_API_KEY}"
+    # إطار 5 دقائق باش نلحقو الحركات الصغيرة (Scalping)
+    url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval=5min&outputsize=100&apikey={TWELVEDATA_API_KEY}"
     response = requests.get(url).json()
     
     if "values" not in response:
@@ -63,7 +64,7 @@ def get_market_data(symbol="XAU/USD"):
     df['Stoch_K'] = 100 * ((df['close'] - low_14) / (high_14 - low_14))
     df['Stoch_D'] = df['Stoch_K'].rolling(window=3).mean()
     
-    # 6. ATR
+    # 6. ATR (لحساب الأهداف الصغيرة)
     high_low = df['high'] - df['low']
     high_close = (df['high'] - df['close'].shift()).abs()
     low_close = (df['low'] - df['close'].shift()).abs()
@@ -83,7 +84,7 @@ def get_market_data(symbol="XAU/USD"):
         "bb_lower": round(latest['BB_Lower'], 2),
         "stoch_k": round(latest['Stoch_K'], 2),
         "stoch_d": round(latest['Stoch_D'], 2),
-        "atr": round(latest['ATR'], 2),
+        "atr": round(latest['ATR'], 3),
     }
 
 def get_filtered_news():
@@ -104,7 +105,7 @@ def get_filtered_news():
                     if len(news_list) >= 4: break
             if len(news_list) >= 4: break
         except: continue
-    return "\n".join(news_list) if news_list else "لا توجد أخبار."
+    return "\n".join(news_list) if news_list else "لا توجد أخبار مهمة."
 
 def is_trading_session():
     now = datetime.now(timezone.utc)
@@ -123,42 +124,43 @@ def calculate_signal(data):
     bb_lower = data['bb_lower']
     atr = data['atr']
     
+    # شروط مرنة (Scalping) - نحتاجو 3 من 5 بدل 4
     score = 0
     direction = "NEUTRAL"
     
-    # شروط الشراء القوية
-    if price > ema20 and ema20 > ema50 and rsi < 65 and macd > macd_signal and stoch_k < 75 and price < bb_upper:
+    # شروط الشراء
+    if price > ema20 and rsi < 70 and macd > macd_signal and stoch_k > stoch_d and price < bb_upper:
         score += 1
-    if 40 < rsi < 65: score += 1
-    if macd > macd_signal and macd > 0: score += 1
-    if stoch_k < 75 and stoch_k > stoch_d: score += 1
-    if price > ema50: score += 1
+    if 40 < rsi < 70: score += 1
+    if macd > macd_signal: score += 1
+    if stoch_k > stoch_d and stoch_k < 80: score += 1
+    if price > ema20: score += 1
     
-    if score >= 4:
+    if score >= 3:
         direction = "BUY"
     
-    # شروط البيع القوية
+    # شروط البيع
     score = 0
-    if price < ema20 and ema20 < ema50 and rsi > 35 and macd < macd_signal and stoch_k > 25 and price > bb_lower:
+    if price < ema20 and rsi > 30 and macd < macd_signal and stoch_k < stoch_d and price > bb_lower:
         score += 1
-    if 35 < rsi < 60: score += 1
-    if macd < macd_signal and macd < 0: score += 1
-    if stoch_k > 25 and stoch_k < stoch_d: score += 1
-    if price < ema50: score += 1
+    if 30 < rsi < 60: score += 1
+    if macd < macd_signal: score += 1
+    if stoch_k < stoch_d and stoch_k > 20: score += 1
+    if price < ema20: score += 1
     
-    if score >= 4:
+    if score >= 3:
         direction = "SELL"
     
-    # إدارة المخاطر
+    # إدارة المخاطر (أهداف صغيرة للـ Scalping)
     if direction == "BUY":
         entry = price
-        sl = price - (atr * 1.5)
-        tp = price + (atr * 3.0)
+        sl = price - (atr * 1.0)  # وقف خسارة قريب
+        tp = price + (atr * 1.5)  # هدف قريب
         return direction, entry, sl, tp
     elif direction == "SELL":
         entry = price
-        sl = price + (atr * 1.5)
-        tp = price - (atr * 3.0)
+        sl = price + (atr * 1.0)
+        tp = price - (atr * 1.5)
         return direction, entry, sl, tp
     
     return "NEUTRAL", 0, 0, 0
@@ -197,12 +199,12 @@ async def main():
     direction, entry, sl, tp = calculate_signal(data)
     
     if direction == "NEUTRAL":
-        print("لا توجد إشارة قوية دابا. البوت كيراقب.")
+        print(f"لا توجد إشارة قوية دابا. البوت كيراقب. (Score < 3)")
         return
     
     prompt = f"""
-    أنت مدير صندوق تحوط (Hedge Fund Manager) خبير. 
-    لدينا إشارة {direction} على الذهب (XAU/USD).
+    أنت مدير صندوق تحوط (Hedge Fund Manager) خبير في المضاربة السريعة (Scalping). 
+    لدينا إشارة {direction} على الذهب (XAU/USD) على إطار 5 دقائق.
     - السعر الحالي: {data['price']}
     - الدخول المقترح: {entry}
     - وقف الخسارة: {sl}
@@ -210,27 +212,27 @@ async def main():
     - RSI: {data['rsi']}, MACD: {data['macd']}, Stoch: {data['stoch_k']}
     - الأخبار: {news}
     
-    هل تؤكد هذه الصفقة؟ ما هي نسبة نجاحها من 100% برأيك؟ اشرح باختصار.
+    هل تؤكد هذه الصفقة السريعة؟ اشرح باختصار.
     """
-    
+
     ai_opinion = analyze_with_ai("openrouter", prompt)
 
     message = f"""
-🎯 **فرصة تداول قوية (XAU/USD)** 🎯
+⚡ **إشارة سريعة (Scalping) - XAU/USD** ⚡
 الاتجاه: **{direction}**
 💰 السعر الحالي: {data['price']}
 🚪 الدخول المقترح: {entry}
 🛑 وقف الخسارة (SL): {sl}
 🎯 الهدف (TP): {tp}
-(Risk/Reward = 1:2)
+⏱️ *هدف سريع (5 دقائق)*
 
 📊 **المؤشرات:**
 RSI: {data['rsi']} | MACD: {data['macd']} | Stoch: {data['stoch_k']}
 
-🤖 **رأي المستشار المالي (Ling Fin):**
+🤖 **رأي المستشار المالي:**
 {ai_opinion}
 
-⚠️ *هذا تحليل تقني وليس نصيحة استثمارية. التزم بإدارة رأس المال.*
+⚠️ *هذا تحليل تقني وليس نصيحة استثمارية.*
     """
     
     await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message, parse_mode='Markdown')
